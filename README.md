@@ -1,4 +1,4 @@
-Redis Cluster FDW for PostgreSQL 9.1+
+Redis Cluster FDW for PostgreSQL 13
 ==============================
 
 This PostgreSQL extension implements a Foreign Data Wrapper (FDW) for
@@ -14,24 +14,21 @@ warned!
 
 Building
 --------
+To build the code, you will need the hiredis_cluster C interface to Redis installed
+on your system. You can checkout the hiredis_clsuter from
+https://github.com/Nordix/hiredis-cluster
 
-To build the code, you need the hiredis C interface to Redis installed
+You will also need the hiredis C interface to Redis installed
 on your system. You can checkout the hiredis from
 https://github.com/redis/hiredis
 or it might be available for your OS as it is for Fedora, for example.
 
 Once that's done, the extension can be built with:
 
-    PATH=/usr/local/pgsql91/bin/:$PATH make USE_PGXS=1
-    sudo PATH=/usr/local/pgsql91/bin/:$PATH make USE_PGXS=1 install
+    PATH=/usr/lib/postgresql/13/bin/:$PATH make USE_PGXS=1
+    sudo PATH=/usr/lib/postgresql/13/bin/:$PATH make USE_PGXS=1 install
 
-(assuming you have PostgreSQL 9.1 in /usr/local/pgsql91).
-
-Make necessary changes for 9.2 and later.
-
-You will need to have the right branch checked out to match the PostgreSQL
-release you are building against, as the FDW API has changed from release
-to release.
+(assuming you have PostgreSQL 13 in /usr/lib/postgresql/13/bin).
 
 Dave has tested the original on Mac OS X 10.6 only, and Andrew on Fedora and
 Suse. Other *nix's should also work.
@@ -49,15 +46,6 @@ Limitations
 - We can only push down a single qual to Redis, which must use the
   TEXTEQ operator, and must be on the 'key' column.
 
-- There is no support for non-scalar datatypes in Redis
-  such as lists, for PostgreSQL 9.1. There is such support for later releases.
-
-- Redis has acquired cursors as of Release 2.8. This is used in all the
-  mainline branches from REL9_2_STABLE on, for operations which would otherwise
-  either scan the entire Redis database in a single sweep, or scan a single,
-  possible large, keyset in a single sweep. Redis Releases prior to 2.8 are
-  maintained on the REL9_x_STABLE_pre2.8 branches.
-
 - Redis cursors have some significant limitations. The Redis docs say:
 
     A given element may be returned multiple times. It is up to the
@@ -73,27 +61,21 @@ Usage
 
 The following parameters can be set on a Redis foreign server:
 
-address:	The address or hostname of the Redis server.
-	 	Default: 127.0.0.1
-
-port:		The port number on which the Redis server is listening.
-     		Default: 6379
+nodes:	A comma separated list addresses or hostnames of the Redis cluster servers.
+	 	Default: 127.0.0.1:6379
 
 The following parameters can be set on a Redis foreign table:
 
-database:	The numeric ID of the Redis database to query.
-	  	Default: 0
-
-(9.2 and later) tabletype: can be 'hash', 'list', 'set' or 'zset'
+tabletype: can be 'hash', 'list', 'set' or 'zset'
 	    Default: none, meaning only look at scalar values.
 
-(9.2 and later) tablekeyprefix: only get items whose names start with the prefix
+tablekeyprefix: only get items whose names start with the prefix
         Default: none
 
-(9.2 and later) tablekeyset: fetch item names from the named set
+tablekeyset: fetch item names from the named set
         Default: none
 
-(9.2 and later) singleton_key: get all the values in the table from a single
+singleton_key: get all the values in the table from a single
 named object.
 	    Default: none, meaning don't just use a single object.
 
@@ -118,8 +100,8 @@ password:	The password to authenticate to the Redis server with.
 Insert, Update and Delete
 -------------------------
 
-PostgreSQL acquired support for modifying foreign tables in release 9.3, and
-now the Redis Foreign Data Wrapper supports these too, for 9.3 and later
+PostgreSQL acquired support for modifying foreign tables in release 9.3,
+the Redis Cluster Foreign Data Wrapper supports these too, for 9.3 and later
 PostgreSQL releases. There are a few restriction on this:
 
 - only INSERT works for singleton key list tables, due to limitations
@@ -138,8 +120,7 @@ Example
 		OPTIONS (addresses '127.0.0.1:6379,127.0.0.2:6379,127.0.0.3:6379');
 
 	CREATE FOREIGN TABLE redis_db0 (key text, val text)
-		SERVER redis_cluster
-		OPTIONS (database '0');
+		SERVER redis_cluster;
 
 	CREATE USER MAPPING FOR PUBLIC
 		SERVER redis_cluster
@@ -147,7 +128,7 @@ Example
 
 	CREATE FOREIGN TABLE myredishash (key text, val text[])
 		SERVER redis_cluster
-		OPTIONS (database '0', tabletype 'hash', tablekeyprefix 'mytable:');
+		OPTIONS (tabletype 'hash', tablekeyprefix 'mytable:');
 
     INSERT INTO myredishash (key, val)
        VALUES ('mytable:r1','{prop1,val1,prop2,val2}');
@@ -161,7 +142,7 @@ Example
 
 	CREATE FOREIGN TABLE myredis_s_hash (key text, val text)
 		SERVER redis_cluster
-		OPTIONS (database '0', tabletype 'hash',  singleton_key 'mytable');
+		OPTIONS (tabletype 'hash',  singleton_key 'mytable');
 
     INSERT INTO myredis_s_hash (key, val)
        VALUES ('prop1','val1'),('prop2','val2');
@@ -176,8 +157,8 @@ Example
 Testing
 -------
 
-The tests for 9.2 and later assume that you have access to a redis server
-on the localmachine with no password, and uses database 15, which must be empty,
+The tests assume that you have access to a redis cluster server
+on the localmachine with no password,
 and that the redis-cli program is in the PATH when it is run.
 The test script checks that the database is empty before it tries to
 populate it, and it cleans up afterwards.
@@ -191,3 +172,6 @@ dpage@pgadmin.org
 
 Andrew Dunstan
 andrew@dunslane.net
+	
+Jeffrey Walter
+jeffreydwalter@gmail.com
