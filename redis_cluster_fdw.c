@@ -8,7 +8,8 @@
  * This software is released under the PostgreSQL Licence
  *
  * Authors: Dave Page <dpage@pgadmin.org>
- *			Andrew Dunstan <andrew@dunslane.net>
+ *	    Andrew Dunstan <andrew@dunslane.net>
+ *          Jeffrey Walter <jeffreydwalter@gmail.com>
  *
  * IDENTIFICATION
  *		  redis_cluster_fdw/redis_cluster_fdw.c
