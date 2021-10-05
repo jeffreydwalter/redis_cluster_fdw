@@ -11,7 +11,7 @@
  *			Andrew Dunstan <andrew@dunslane.net>
  *
  * IDENTIFICATION
- *		  redis_fdw/redis_fdw.c
+ *		  redis_cluster_fdw/redis_cluster_fdw.c
  *
  *-------------------------------------------------------------------------
  */
@@ -22,8 +22,8 @@
 #include "postgres.h"
 
 /* check that we are compiling for the right postgres version */
-#if PG_VERSION_NUM < 150000
-#error wrong Postgresql version this branch is only for 15.
+#if PG_VERSION_NUM < 130000 || PG_VERSION_NUM  >= 140000
+#error wrong Postgresql version this branch is only for 13.
 #endif
 
 
@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include <hiredis/hiredis.h>
+#include <hircluster/hircluster.h>
 
 #include "funcapi.h"
 #include "access/reloptions.h"
@@ -50,7 +51,6 @@
 #include "nodes/pathnodes.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
-#include "optimizer/appendinfo.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -76,15 +76,14 @@ struct RedisFdwOption
 };
 
 /*
- * Valid options for redis_fdw.
+ * Valid options for redis_cluster_fdw.
  *
  */
 static struct RedisFdwOption valid_options[] =
 {
 
 	/* Connection options */
-	{"address", ForeignServerRelationId},
-	{"port", ForeignServerRelationId},
+	{"nodes", ForeignServerRelationId},
 	{"password", UserMappingRelationId},
 	{"database", ForeignTableRelationId},
 
@@ -109,8 +108,7 @@ typedef enum
 
 typedef struct redisTableOptions
 {
-	char	   *address;
-	int			port;
+	char	   *nodes;
 	char	   *password;
 	int			database;
 	char	   *keyprefix;
@@ -120,11 +118,9 @@ typedef struct redisTableOptions
 } redisTableOptions;
 
 
-
 typedef struct
 {
-	char	   *svr_address;
-	int			svr_port;
+	char	   *svr_nodes;
 	char	   *svr_password;
 	int			svr_database;
 } RedisFdwPlanState;
@@ -136,11 +132,10 @@ typedef struct
 typedef struct RedisFdwExecutionState
 {
 	AttInMetadata *attinmeta;
-	redisContext *context;
+	redisClusterContext *context;
 	redisReply *reply;
 	long long	row;
-	char	   *address;
-	int			port;
+	char	   *nodes;
 	char	   *password;
 	int			database;
 	char	   *keyprefix;
@@ -155,9 +150,8 @@ typedef struct RedisFdwExecutionState
 
 typedef struct RedisFdwModifyState
 {
-	redisContext *context;
-	char	   *address;
-	int			port;
+	redisClusterContext *context;
+	char	   *nodes;
 	char	   *password;
 	int			database;
 	char	   *keyprefix;
@@ -182,11 +176,11 @@ typedef struct RedisFdwModifyState
 /*
  * SQL functions
  */
-extern Datum redis_fdw_handler(PG_FUNCTION_ARGS);
-extern Datum redis_fdw_validator(PG_FUNCTION_ARGS);
+extern Datum redis_cluster_fdw_handler(PG_FUNCTION_ARGS);
+extern Datum redis_cluster_fdw_validator(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(redis_fdw_handler);
-PG_FUNCTION_INFO_V1(redis_fdw_validator);
+PG_FUNCTION_INFO_V1(redis_cluster_fdw_handler);
+PG_FUNCTION_INFO_V1(redis_cluster_fdw_validator);
 
 /*
  * FDW callback routines
@@ -231,10 +225,9 @@ static TupleTableSlot *redisExecForeignInsert(EState *estate,
 					   TupleTableSlot *planSlot);
 static void redisEndForeignModify(EState *estate,
 					  ResultRelInfo *rinfo);
-static void redisAddForeignUpdateTargets(PlannerInfo *root,
-										 Index rtindex,
-										 RangeTblEntry *target_rte,
-										 Relation target_relation);
+static void redisAddForeignUpdateTargets(Query *parsetree,
+							 RangeTblEntry *target_rte,
+							 Relation target_relation);
 static TupleTableSlot *redisExecForeignDelete(EState *estate,
 					   ResultRelInfo *rinfo,
 					   TupleTableSlot *slot,
@@ -252,7 +245,7 @@ static void redisGetOptions(Oid foreigntableid, redisTableOptions *options);
 static void redisGetQual(Node *node, TupleDesc tupdesc, char **key,
 						 char **value, bool *pushdown);
 static char *process_redis_array(redisReply *reply, redis_table_type type);
-static void check_reply(redisReply *reply, redisContext *context,
+static void check_reply(redisReply *reply, redisClusterContext *context,
 						int error_code, char *message, char *arg);
 
 /*
@@ -266,12 +259,12 @@ static void check_reply(redisReply *reply, redisContext *context,
  * to my callback routines.
  */
 Datum
-redis_fdw_handler(PG_FUNCTION_ARGS)
+redis_cluster_fdw_handler(PG_FUNCTION_ARGS)
 {
 	FdwRoutine *fdwroutine = makeNode(FdwRoutine);
 
 #ifdef DEBUG
-	elog(NOTICE, "redis_fdw_handler");
+	elog(NOTICE, "redis_cluster_fdw_handler");
 #endif
 
 	fdwroutine->GetForeignRelSize = redisGetForeignRelSize;
@@ -304,12 +297,11 @@ redis_fdw_handler(PG_FUNCTION_ARGS)
  * Raise an ERROR if the option or its value is considered invalid.
  */
 Datum
-redis_fdw_validator(PG_FUNCTION_ARGS)
+redis_cluster_fdw_validator(PG_FUNCTION_ARGS)
 {
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
-	char	   *svr_address = NULL;
-	int			svr_port = 0;
+	char	   *svr_nodes = NULL;
 	char	   *svr_password = NULL;
 	int			svr_database = 0;
 	redis_table_type tabletype = PG_REDIS_SCALAR_TABLE;
@@ -319,16 +311,16 @@ redis_fdw_validator(PG_FUNCTION_ARGS)
 	ListCell   *cell;
 
 #ifdef DEBUG
-	elog(NOTICE, "redis_fdw_validator");
+	elog(NOTICE, "redis_cluster_fdw_validator");
 #endif
 
 	/*
-	 * Check that only options supported by redis_fdw, and allowed for the
+	 * Check that only options supported by redis_cluster_fdw, and allowed for the
 	 * current object type, are given.
 	 */
 	foreach(cell, options_list)
 	{
-		DefElem    *def = (DefElem *) lfirst(cell);
+		DefElem	*def = (DefElem *) lfirst(cell);
 
 		if (!redisIsValidOption(def->defname, catalog))
 		{
@@ -355,27 +347,17 @@ redis_fdw_validator(PG_FUNCTION_ARGS)
 					 ));
 		}
 
-		if (strcmp(def->defname, "address") == 0)
+		if (strcmp(def->defname, "nodes") == 0)
 		{
-			if (svr_address)
+			if (svr_nodes)
 				ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
 								errmsg("conflicting or redundant options: "
-									   "address (%s)", defGetString(def))
+									   "nodes (%s)", defGetString(def))
 								));
 
-			svr_address = defGetString(def);
+			svr_nodes = defGetString(def);
 		}
-		else if (strcmp(def->defname, "port") == 0)
-		{
-			if (svr_port)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options: port (%s)",
-								defGetString(def))
-						 ));
-
-			svr_port = atoi(defGetString(def));
-		}
+		
 		if (strcmp(def->defname, "password") == 0)
 		{
 			if (svr_password)
@@ -522,7 +504,7 @@ redisIsValidOption(const char *option, Oid context)
 }
 
 /*
- * Fetch the options for a redis_fdw foreign table.
+ * Fetch the options for a redis_cluster_fdw foreign table.
  */
 static void
 redisGetOptions(Oid foreigntableid, redisTableOptions *table_options)
@@ -551,16 +533,13 @@ redisGetOptions(Oid foreigntableid, redisTableOptions *table_options)
 	options = list_concat(options, server->options);
 	options = list_concat(options, mapping->options);
 
-	/* Loop through the options, and get the server/port */
+	/* Loop through the options, and get the server:port list */
 	foreach(lc, options)
 	{
-		DefElem    *def = (DefElem *) lfirst(lc);
+		DefElem	*def = (DefElem *) lfirst(lc);
 
-		if (strcmp(def->defname, "address") == 0)
-			table_options->address = defGetString(def);
-
-		if (strcmp(def->defname, "port") == 0)
-			table_options->port = atoi(defGetString(def));
+		if (strcmp(def->defname, "nodes") == 0)
+			table_options->nodes = defGetString(def);
 
 		if (strcmp(def->defname, "password") == 0)
 			table_options->password = defGetString(def);
@@ -594,11 +573,8 @@ redisGetOptions(Oid foreigntableid, redisTableOptions *table_options)
 	}
 
 	/* Default values, if required */
-	if (!table_options->address)
-		table_options->address = "127.0.0.1";
-
-	if (!table_options->port)
-		table_options->port = 6379;
+	if (!table_options->nodes)
+		table_options->nodes = "127.0.0.1:6379";
 
 	if (!table_options->database)
 		table_options->database = 0;
@@ -613,7 +589,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 	RedisFdwPlanState *fdw_private;
 	redisTableOptions table_options;
 
-	redisContext *context;
+	redisClusterContext *context;
 	redisReply *reply;
 	struct timeval timeout = {1, 500000};
 
@@ -625,11 +601,12 @@ redisGetForeignRelSize(PlannerInfo *root,
 	 * Fetch options. Get everything so we don't need to re-fetch it later in
 	 * planning.
 	 */
+	elog(NOTICE, "line 626 before palloc");
 	fdw_private = (RedisFdwPlanState *) palloc(sizeof(RedisFdwPlanState));
+	elog(NOTICE, "line 626 after palloc");
 	baserel->fdw_private = (void *) fdw_private;
 
-	table_options.address = NULL;
-	table_options.port = 0;
+	table_options.nodes = NULL;
 	table_options.password = NULL;
 	table_options.database = 0;
 	table_options.keyprefix = NULL;
@@ -638,29 +615,30 @@ redisGetForeignRelSize(PlannerInfo *root,
 	table_options.table_type = PG_REDIS_SCALAR_TABLE;
 
 	redisGetOptions(foreigntableid, &table_options);
-	fdw_private->svr_address = table_options.address;
+	fdw_private->svr_nodes = table_options.nodes;
 	fdw_private->svr_password = table_options.password;
-	fdw_private->svr_port = table_options.port;
 	fdw_private->svr_database = table_options.database;
 
 	/* Connect to the database */
-	context = redisConnectWithTimeout(table_options.address, table_options.port,
-									  timeout);
-
-	if (context->err)
+	context = redisClusterContextInit();
+	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	redisClusterSetOptionConnectTimeout(context, timeout);
+	redisClusterConnect2(context);
+	if (context->err) {
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-				 errmsg("failed to connect to Redis: %d", context->err)
-				 ));
+				 errmsg("failed to connect to Redis: %s", context->errstr)
+				));
+	}
 
 	/* Authenticate */
 	if (table_options.password)
 	{
-		reply = redisCommand(context, "AUTH %s", table_options.password);
+		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
 
 		if (!reply)
 		{
-			redisFree(context);
+			redisClusterFree(context);
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 					 errmsg("failed to authenticate to redis: %d",
@@ -671,11 +649,11 @@ redisGetForeignRelSize(PlannerInfo *root,
 	}
 
 	/* Select the appropriate database */
-	reply = redisCommand(context, "SELECT %d", table_options.database);
+	reply = redisClusterCommand(context, "SELECT %d", table_options.database);
 
 	if (!reply)
 	{
-		redisFree(context);
+		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 				 errmsg("failed to select database %d: %d",
@@ -694,10 +672,12 @@ redisGetForeignRelSize(PlannerInfo *root,
 	{
 		/* it's a pity there isn't an NKEYS command in Redis */
 		int			len = strlen(table_options.keyprefix) + 2;
+		elog(NOTICE, "line 697 before palloc");
 		char	   *buff = palloc(len * sizeof(char));
+		elog(NOTICE, "line 697 after palloc");
 
 		snprintf(buff, len, "%s*", table_options.keyprefix);
-		reply = redisCommand(context, "KEYS %s", buff);
+		reply = redisClusterCommand(context, "KEYS %s", buff);
 	}
 	else
 #endif
@@ -709,16 +689,16 @@ redisGetForeignRelSize(PlannerInfo *root,
 				baserel->rows = 1;
 				return;
 			case PG_REDIS_HASH_TABLE:
-				reply = redisCommand(context, "HLEN %s", table_options.singleton_key);
+				reply = redisClusterCommand(context, "HLEN %s", table_options.singleton_key);
 				break;
 			case PG_REDIS_LIST_TABLE:
-				reply = redisCommand(context, "LLEN %s", table_options.singleton_key);
+				reply = redisClusterCommand(context, "LLEN %s", table_options.singleton_key);
 				break;
 			case PG_REDIS_SET_TABLE:
-				reply = redisCommand(context, "SCARD %s", table_options.singleton_key);
+				reply = redisClusterCommand(context, "SCARD %s", table_options.singleton_key);
 				break;
 			case PG_REDIS_ZSET_TABLE:
-				reply = redisCommand(context, "ZCARD %s", table_options.singleton_key);
+				reply = redisClusterCommand(context, "ZCARD %s", table_options.singleton_key);
 				break;
 			default:
 				;
@@ -726,16 +706,16 @@ redisGetForeignRelSize(PlannerInfo *root,
 	}
 	else if (table_options.keyset)
 	{
-		reply = redisCommand(context, "SCARD %s", table_options.keyset);
+		reply = redisClusterCommand(context, "SCARD %s", table_options.keyset);
 	}
 	else
 	{
-		reply = redisCommand(context, "DBSIZE");
+		reply = redisClusterCommand(context, "DBSIZE");
 	}
 
 	if (!reply)
 	{
-		redisFree(context);
+		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 				 errmsg("failed to get the database size: %d", context->err)
@@ -753,7 +733,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 		baserel->rows = reply->integer;
 
 	freeReplyObject(reply);
-	redisFree(context);
+	redisClusterFree(context);
 
 
 }
@@ -779,8 +759,8 @@ redisGetForeignPaths(PlannerInfo *root,
 	elog(NOTICE, "redisGetForeignPaths");
 #endif
 
-	if (strcmp(fdw_private->svr_address, "127.0.0.1") == 0 ||
-		strcmp(fdw_private->svr_address, "localhost") == 0)
+	if (strcmp(fdw_private->svr_nodes, "127.0.0.1:6379") == 0 ||
+		strcmp(fdw_private->svr_nodes, "localhost:6379") == 0)
 		startup_cost = 10;
 	else
 		startup_cost = 25;
@@ -791,13 +771,13 @@ redisGetForeignPaths(PlannerInfo *root,
 	/* Create a ForeignPath node and add it as only possible path */
 	add_path(baserel, (Path *)
 			 create_foreignscan_path(root, baserel,
-									 NULL,      /* default pathtarget */
+									 NULL,	  /* default pathtarget */
 									 baserel->rows,
 									 startup_cost,
 									 total_cost,
 									 NIL,		/* no pathkeys */
 									 NULL,		/* no outer rel either */
-									 NULL,        /* no extra plan */
+									 NULL,		/* no extra plan */
 									 NIL));		/* no fdw_private data */
 
 }
@@ -832,8 +812,8 @@ redisGetForeignPlan(PlannerInfo *root,
 							scan_relid,
 							NIL,	/* no expressions to evaluate */
 							NIL,	/* no private state either */
-							NIL,    /* no custom tlist */
-							NIL,    /* no remote quals */
+							NIL,	/* no custom tlist */
+							NIL,	/* no remote quals */
 							outer_plan);
 }
 
@@ -863,16 +843,16 @@ redisExplainForeignScan(ForeignScanState *node, ExplainState *es)
 
 	if (festate->keyset)
 	{
-		reply = redisCommand(festate->context, "SCARD %s", festate->keyset);
+		reply = redisClusterCommand(festate->context, "SCARD %s", festate->keyset);
 	}
 	else
 	{
-		reply = redisCommand(festate->context, "DBSIZE");
+		reply = redisClusterCommand(festate->context, "DBSIZE");
 	}
 
 	if (!reply)
 	{
-		redisFree(festate->context);
+		redisClusterFree(festate->context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			errmsg("failed to get the table size: %d", festate->context->err)
@@ -905,7 +885,7 @@ static void
 redisBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	redisTableOptions table_options;
-	redisContext *context;
+	redisClusterContext *context;
 	redisReply *reply;
 	char	   *qual_key = NULL;
 	char	   *qual_value = NULL;
@@ -917,8 +897,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	elog(NOTICE, "BeginForeignScan");
 #endif
 
-	table_options.address = NULL;
-	table_options.port = 0;
+	table_options.nodes = NULL;
 	table_options.password = NULL;
 	table_options.database = 0;
 	table_options.keyprefix = NULL;
@@ -932,26 +911,26 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 					&table_options);
 
 	/* Connect to the server */
-	context = redisConnectWithTimeout(table_options.address,
-									  table_options.port, timeout);
-
-	if (context->err)
-	{
-		redisFree(context);
+	context = redisClusterContextInit();
+	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	redisClusterSetOptionConnectTimeout(context, timeout);
+	redisClusterConnect2(context);
+	if (context != NULL && context->err) {
+		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
-				 ));
+				));
 	}
 
 	/* Authenticate */
 	if (table_options.password)
 	{
-		reply = redisCommand(context, "AUTH %s", table_options.password);
+		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
 
 		if (!reply)
 		{
-			redisFree(context);
+			redisClusterFree(context);
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			   errmsg("failed to authenticate to redis: %s", context->errstr)
@@ -962,11 +941,11 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 
 	/* Select the appropriate database */
-	reply = redisCommand(context, "SELECT %d", table_options.database);
+	reply = redisClusterCommand(context, "SELECT %d", table_options.database);
 
 	if (!reply)
 	{
-		redisFree(context);
+		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to select database %d: %s",
@@ -1006,13 +985,14 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 
 	/* Stash away the state info we have already */
+	elog(NOTICE, "line 1011 before palloc");
 	festate = (RedisFdwExecutionState *) palloc(sizeof(RedisFdwExecutionState));
+	elog(NOTICE, "line 1011 after palloc");
 	node->fdw_state = (void *) festate;
 	festate->context = context;
 	festate->reply = NULL;
 	festate->row = 0;
-	festate->address = table_options.address;
-	festate->port = table_options.port;
+	festate->nodes = table_options.nodes;
 	festate->keyprefix = table_options.keyprefix;
 	festate->keyset = table_options.keyset;
 	festate->singleton_key = table_options.singleton_key;
@@ -1046,23 +1026,23 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		switch (table_options.table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				reply = redisCommand(context, "GET %s", festate->singleton_key);
+				reply = redisClusterCommand(context, "GET %s", festate->singleton_key);
 				break;
 			case PG_REDIS_HASH_TABLE:
 				/* the singleton case where a qual pushdown makes most sense */
 				if (qual_value && pushdown)
-					reply = redisCommand(context, "HGET %s %s", festate->singleton_key, qual_value);
+					reply = redisClusterCommand(context, "HGET %s %s", festate->singleton_key, qual_value);
 				else
-					reply = redisCommand(context, "HGETALL %s", festate->singleton_key);
+					reply = redisClusterCommand(context, "HGETALL %s", festate->singleton_key);
 				break;
 			case PG_REDIS_LIST_TABLE:
-				reply = redisCommand(context, "LRANGE %s 0 -1", table_options.singleton_key);
+				reply = redisClusterCommand(context, "LRANGE %s 0 -1", table_options.singleton_key);
 				break;
 			case PG_REDIS_SET_TABLE:
-				reply = redisCommand(context, "SMEMBERS %s", table_options.singleton_key);
+				reply = redisClusterCommand(context, "SMEMBERS %s", table_options.singleton_key);
 				break;
 			case PG_REDIS_ZSET_TABLE:
-				reply = redisCommand(context, "ZRANGEBYSCORE %s -inf inf WITHSCORES", table_options.singleton_key);
+				reply = redisClusterCommand(context, "ZRANGEBYSCORE %s -inf inf WITHSCORES", table_options.singleton_key);
 				break;
 			default:
 				;
@@ -1080,11 +1060,11 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		{
 			redisReply *sreply;
 
-			sreply = redisCommand(context, "SISMEMBER %s %s",
+			sreply = redisClusterCommand(context, "SISMEMBER %s %s",
 								  festate->keyset, qual_value);
 			if (!sreply)
 			{
-				redisFree(festate->context);
+				redisClusterFree(festate->context);
 				ereport(ERROR,
 						(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 						 errmsg("failed to list keys: %s", context->errstr)
@@ -1119,7 +1099,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		 * checks, is any, so we know the item is really there.
 		 */
 
-		reply = redisCommand(context, "EXISTS %s", qual_value);
+		reply = redisClusterCommand(context, "EXISTS %s", qual_value);
 		if (reply->integer == 0)
 			festate->row = -1;
 
@@ -1130,25 +1110,25 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		if (festate->keyset)
 		{
 			festate->cursor_search_string = "SSCAN %s %s" COUNT;
-			reply = redisCommand(context, festate->cursor_search_string,
+			reply = redisClusterCommand(context, festate->cursor_search_string,
 								 festate->keyset, ZERO);
 		}
 		else if (festate->keyprefix)
 		{
 			festate->cursor_search_string = "SCAN %s MATCH %s*" COUNT;
-			reply = redisCommand(context, festate->cursor_search_string,
+			reply = redisClusterCommand(context, festate->cursor_search_string,
 								 ZERO, festate->keyprefix);
 		}
 		else
 		{
 			festate->cursor_search_string = "SCAN %s" COUNT;
-			reply = redisCommand(context, festate->cursor_search_string, ZERO);
+			reply = redisClusterCommand(context, festate->cursor_search_string, ZERO);
 		}
 	}
 
 	if (!reply)
 	{
-		redisFree(festate->context);
+		redisClusterFree(festate->context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 				 errmsg("failed to list keys: %s", context->errstr)
@@ -1254,26 +1234,26 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 
 		if (festate->keyset)
 		{
-			creply = redisCommand(festate->context,
+			creply = redisClusterCommand(festate->context,
 								  festate->cursor_search_string,
 								  festate->keyset, festate->cursor_id);
 		}
 		else if (festate->keyprefix)
 		{
-			creply = redisCommand(festate->context,
+			creply = redisClusterCommand(festate->context,
 								  festate->cursor_search_string,
 								  festate->cursor_id, festate->keyprefix);
 		}
 		else
 		{
-			creply = redisCommand(festate->context,
+			creply = redisClusterCommand(festate->context,
 								  festate->cursor_search_string,
 								  festate->cursor_id);
 		}
 
 		if (!creply)
 		{
-			redisFree(festate->context);
+			redisClusterFree(festate->context);
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 					 errmsg("failed to list keys: %s",
@@ -1339,31 +1319,31 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 			switch (festate->table_type)
 			{
 				case PG_REDIS_HASH_TABLE:
-					reply = redisCommand(festate->context,
+					reply = redisClusterCommand(festate->context,
 										 "HGETALL %s", key);
 					break;
 				case PG_REDIS_LIST_TABLE:
-					reply = redisCommand(festate->context,
+					reply = redisClusterCommand(festate->context,
 										 "LRANGE %s 0 -1", key);
 					break;
 				case PG_REDIS_SET_TABLE:
-					reply = redisCommand(festate->context,
+					reply = redisClusterCommand(festate->context,
 										 "SMEMBERS %s", key);
 					break;
 				case PG_REDIS_ZSET_TABLE:
-					reply = redisCommand(festate->context,
-										 "ZRANGE %s 0 -1", key);
+					reply = redisClusterCommand(festate->context,
+										 "ZRANGE %s 0 -1 WITHSCORES", key);
 					break;
 				case PG_REDIS_SCALAR_TABLE:
 				default:
-					reply = redisCommand(festate->context,
+					reply = redisClusterCommand(festate->context,
 										 "GET %s", key);
 			}
 
 			if (!reply)
 			{
 				freeReplyObject(festate->reply);
-				redisFree(festate->context);
+				redisClusterFree(festate->context);
 				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 						 errmsg("failed to get the value for key \"%s\": %s",
 								key, festate->context->errstr)
@@ -1388,7 +1368,9 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 			switch (reply->type)
 			{
 				case REDIS_REPLY_INTEGER:
+					elog(NOTICE, "line 1395 before palloc");
 					data = (char *) palloc(sizeof(char) * 64);
+					elog(NOTICE, "line 1395 after palloc");
 					snprintf(data, 64, "%lld", reply->integer);
 					found = true;
 					break;
@@ -1413,7 +1395,9 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 	/* Build the tuple */
 	if (found)
 	{
+		elog(NOTICE, "line 1422 before palloc");
 		values = (char **) palloc(sizeof(char *) * 2);
+		elog(NOTICE, "line 1423 after palloc");
 		values[0] = key;
 		values[1] = data;
 		tuple = BuildTupleFromCStrings(festate->attinmeta, values);
@@ -1458,7 +1442,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 		switch (festate->reply->type)
 		{
 			case REDIS_REPLY_INTEGER:
+				elog(NOTICE, "line 1469 before palloc");
 				key = (char *) palloc(sizeof(char) * 64);
+				elog(NOTICE, "line 1469 after palloc");
 				snprintf(key, 64, "%lld", festate->reply->integer);
 				found = true;
 				break;
@@ -1470,7 +1456,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 
 			case REDIS_REPLY_ARRAY:
 				freeReplyObject(festate->reply);
-				redisFree(festate->context);
+				redisClusterFree(festate->context);
 				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 				errmsg("not expecting an array for a singleton scalar table")
 								));
@@ -1484,7 +1470,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 		switch (festate->reply->type)
 		{
 			case REDIS_REPLY_INTEGER:
+				elog(NOTICE, "line 1497 before palloc");
 				data = (char *) palloc(sizeof(char) * 64);
+				elog(NOTICE, "line 1497 after palloc");
 				snprintf(data, 64, "%lld", festate->reply->integer);
 				found = true;
 				break;
@@ -1496,7 +1484,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 
 			case REDIS_REPLY_ARRAY:
 				freeReplyObject(festate->reply);
-				redisFree(festate->context);
+				redisClusterFree(festate->context);
 				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 								errmsg("not expecting an array for a single hash property: %s", festate->qual_value)
 								));
@@ -1517,7 +1505,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 			switch (dreply->type)
 			{
 				case REDIS_REPLY_INTEGER:
+					elog(NOTICE, "line 1531 before palloc");
 					data = (char *) palloc(sizeof(char) * 64);
+					elog(NOTICE, "line 1531 after palloc");
 					snprintf(key, 64, "%lld", dreply->integer);
 					break;
 
@@ -1527,7 +1517,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 
 				case REDIS_REPLY_ARRAY:
 					freeReplyObject(festate->reply);
-					redisFree(festate->context);
+					redisClusterFree(festate->context);
 					ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 									errmsg("not expecting array for a hash value or zset score")
 									));
@@ -1538,7 +1528,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 	}
 
 	/* Build the tuple */
+	elog(NOTICE, "line 1555 before palloc");
 	values = (char **) palloc(sizeof(char *) * 2);
+	elog(NOTICE, "line 1555 after palloc");
 
 	if (found)
 	{
@@ -1571,7 +1563,7 @@ redisEndForeignScan(ForeignScanState *node)
 			freeReplyObject(festate->reply);
 
 		if (festate->context)
-			redisFree(festate->context);
+			redisClusterFree(festate->context);
 	}
 }
 
@@ -1626,18 +1618,18 @@ redisGetQual(Node *node, TupleDesc tupdesc, char **key, char **value, bool *push
 			StringInfoData buf;
 
 			initStringInfo(&buf);
+			if (((Const *) right)->consttype == TEXTOID) {
+				/* And get the column and value... */
+				*key = NameStr(TupleDescAttr(tupdesc, varattno - 1)->attname);
+				*value = TextDatumGetCString(((Const *) right)->constvalue);
 
-			/* And get the column and value... */
-			*key = NameStr(TupleDescAttr(tupdesc, varattno - 1)->attname);
-			*value = TextDatumGetCString(((Const *) right)->constvalue);
-
-			/*
-			 * We can push down this qual if: - The operatory is TEXTEQ - The
-			 * qual is on the key column
-			 */
-			if (op->opfuncid == PROCID_TEXTEQ && strcmp(*key, "key") == 0)
-				*pushdown = true;
-
+				/*
+				 * We can push down this qual if: - The operatory is TEXTEQ - The
+				 * qual is on the key column
+				 */
+				if (op->opfuncid == PROCID_TEXTEQ && strcmp(*key, "key") == 0)
+					*pushdown = true;
+			}
 			return;
 		}
 	}
@@ -1675,7 +1667,9 @@ process_redis_array(redisReply *reply, redis_table_type type)
 					int			i;
 
 					pg_verifymbstr(ir->str, ir->len, false);
+					elog(NOTICE, "line 1694 before palloc");
 					buff = palloc(ir->len * 2 + 3);
+					elog(NOTICE, "line 1694 after palloc");
 					crs = buff;
 					*crs++ = '"';
 					for (i = 0; i < ir->len; i++)
@@ -1708,12 +1702,13 @@ process_redis_array(redisReply *reply, redis_table_type type)
 
 
 static void
-redisAddForeignUpdateTargets(PlannerInfo *root,
-							 Index rtindex,
+redisAddForeignUpdateTargets(Query *parsetree,
 							 RangeTblEntry *target_rte,
 							 Relation target_relation)
 {
 	Var		   *var;
+	const char *attrname;
+	TargetEntry *tle;
 
 	/* assumes that this isn't attisdropped */
 	Form_pg_attribute attr =
@@ -1732,15 +1727,23 @@ redisAddForeignUpdateTargets(PlannerInfo *root,
 	 */
 
 	/* Make a Var representing the desired value */
-	var = makeVar(rtindex,
+	var = makeVar(parsetree->resultRelation,
 				  1,
 				  attr->atttypid,
 				  attr->atttypmod,
 				  InvalidOid,
 				  0);
 
-	/* register it as a row-identity column needed by this target rel */
-	add_row_identity_var(root, var, rtindex, REDISMODKEYNAME);
+	/* Wrap it in a resjunk TLE with a made up name ... */
+	attrname = REDISMODKEYNAME;
+
+	tle = makeTargetEntry((Expr *) var,
+						  list_length(parsetree->targetList) + 1,
+						  pstrdup(attrname),
+						  true);
+
+	/* ... and add it to the query's targetlist */
+	parsetree->targetList = lappend(parsetree->targetList, tle);
 
 }
 
@@ -1830,7 +1833,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 						int eflags)
 {
 	redisTableOptions table_options;
-	redisContext *context;
+	redisClusterContext *context;
 	redisReply *reply;
 	RedisFdwModifyState *fmstate;
 	struct timeval timeout = {1, 500000};
@@ -1846,8 +1849,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	elog(NOTICE, "redisBeginForeignModify");
 #endif
 
-	table_options.address = NULL;
-	table_options.port = 0;
+	table_options.nodes = NULL;
 	table_options.password = NULL;
 	table_options.database = 0;
 	table_options.keyprefix = NULL;
@@ -1860,12 +1862,12 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	redisGetOptions(RelationGetRelid(rel),
 					&table_options);
 
-
+	elog(NOTICE, "line 1890 before palloc");
 	fmstate = (RedisFdwModifyState *) palloc(sizeof(RedisFdwModifyState));
+	elog(NOTICE, "line 1890 after palloc");
 	rinfo->ri_FdwState = fmstate;
 	fmstate->rel = rel;
-	fmstate->address = table_options.address;
-	fmstate->port = table_options.port;
+	fmstate->nodes = table_options.nodes;
 	fmstate->keyprefix = table_options.keyprefix;
 	fmstate->keyset = table_options.keyset;
 	fmstate->singleton_key = table_options.singleton_key;
@@ -1873,8 +1875,12 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	fmstate->target_attrs = (List *) list_nth(fdw_private, 0);
 
 	n_attrs = list_length(fmstate->target_attrs);
+	elog(NOTICE, "line 1904 before palloc0");
 	fmstate->p_flinfo = (FmgrInfo *) palloc0(sizeof(FmgrInfo) * (n_attrs + 1));
+	elog(NOTICE, "line 1904 after palloc0");
+	elog(NOTICE, "line 1907 before palloc0");
 	fmstate->targetDims = (int *) palloc0(sizeof(int) * (n_attrs + 1));
+	elog(NOTICE, "line 1907 after palloc");
 
 	array_elem_list = (List *) list_nth(fdw_private, 1);
 	fmstate->array_elem_type = list_nth_oid(array_elem_list, 0);
@@ -1883,7 +1889,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 
 	if (op == CMD_UPDATE || op == CMD_DELETE)
 	{
-		Plan	   *subplan = outerPlanState(mtstate)->plan;
+		Plan	   *subplan = mtstate->mt_plans[subplan_index]->plan;
 		Form_pg_attribute attr = TupleDescAttr(RelationGetDescr(rel), 0);		/* key is first */
 
 		fmstate->keyAttno = ExecFindJunkAttributeInTlist(subplan->targetlist,
@@ -1897,9 +1903,9 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 
 	if (op == CMD_UPDATE || op == CMD_INSERT)
 	{
-
+		elog(NOTICE, "line 1932 before palloc0");
 		fmstate->targetDims = (int *) palloc0(sizeof(int) * (n_attrs + 1));
-
+		elog(NOTICE, "line 1932 before palloc0");
 		foreach(lc, fmstate->target_attrs)
 		{
 			int			attnum = lfirst_int(lc);
@@ -1991,26 +1997,26 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 		return;
 
 	/* Finally, Connect to the server and set the Redis execution context */
-	context = redisConnectWithTimeout(table_options.address,
-									  table_options.port, timeout);
-
-	if (context->err)
-	{
-		redisFree(context);
+	context = redisClusterContextInit();
+	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	redisClusterSetOptionConnectTimeout(context, timeout);
+	redisClusterConnect2(context);
+	if (context != NULL && context->err) {
+		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
-				 ));
-	}
+				));
+	}	
 
 	/* Authenticate */
 	if (table_options.password)
 	{
-		reply = redisCommand(context, "AUTH %s", table_options.password);
+		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
 
 		if (!reply)
 		{
-			redisFree(context);
+			redisClusterFree(context);
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			   errmsg("failed to authenticate to redis: %s", context->errstr)
@@ -2021,7 +2027,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	}
 
 	/* Select the appropriate database */
-	reply = redisCommand(context, "SELECT %d", table_options.database);
+	reply = redisClusterCommand(context, "SELECT %d", table_options.database);
 
 	check_reply(reply, context, ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION,
 				"failed to select database", NULL);
@@ -2033,16 +2039,16 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 }
 
 static void
-check_reply(redisReply *reply, redisContext *context, int error_code, char *message, char *arg)
+check_reply(redisReply *reply, redisClusterContext *context, int error_code, char *message, char *arg)
 {
 	char	   *err;
 	char	   *xmessage;
-	int         msglen;
+	int		 msglen;
 
 	if (!reply)
 	{
 		err = pstrdup(context->errstr);
-		redisFree(context);
+		redisClusterFree(context);
 	}
 	else if (reply->type == REDIS_REPLY_ERROR)
 	{
@@ -2053,7 +2059,9 @@ check_reply(redisReply *reply, redisContext *context, int error_code, char *mess
 		return;
 
 	msglen = strlen(message);
+	elog(NOTICE, "line 2088 before palloc");
 	xmessage = palloc(msglen + 6);
+	elog(NOTICE, "line 2088 after palloc");
 	strncpy(xmessage, message, msglen + 1);
 	strcat(xmessage, ": %s");
 
@@ -2077,7 +2085,7 @@ redisExecForeignInsert(EState *estate,
 {
 	RedisFdwModifyState *fmstate =
 	(RedisFdwModifyState *) rinfo->ri_FdwState;
-	redisContext *context = fmstate->context;
+	redisClusterContext *context = fmstate->context;
 	redisReply *sreply = NULL;
 	bool		isnull;
 	Datum		key;
@@ -2111,19 +2119,19 @@ redisExecForeignInsert(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				sreply = redisCommand(context, "EXISTS %s",		/* 1 or 0 */
+				sreply = redisClusterCommand(context, "EXISTS %s",		/* 1 or 0 */
 									  fmstate->singleton_key);
 				break;
 			case PG_REDIS_HASH_TABLE:
-				sreply = redisCommand(context, "HEXISTS %s %s", /* 1 or 0 */
+				sreply = redisClusterCommand(context, "HEXISTS %s %s", /* 1 or 0 */
 									  fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_SET_TABLE:
-				sreply = redisCommand(context, "SISMEMBER %s %s",		/* 1 or 0 */
+				sreply = redisClusterCommand(context, "SISMEMBER %s %s",		/* 1 or 0 */
 									  fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_ZSET_TABLE:
-				sreply = redisCommand(context, "ZRANK %s %s",	/* n or nil */
+				sreply = redisClusterCommand(context, "ZRANK %s %s",	/* n or nil */
 
 									  fmstate->singleton_key, keyval);
 				break;
@@ -2172,19 +2180,19 @@ redisExecForeignInsert(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				sreply = redisCommand(context, "SET %s %s",
+				sreply = redisClusterCommand(context, "SET %s %s",
 									  fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_SET_TABLE:
-				sreply = redisCommand(context, "SADD %s %s",
+				sreply = redisClusterCommand(context, "SADD %s %s",
 									  fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_LIST_TABLE:
-				sreply = redisCommand(context, "RPUSH %s %s",
+				sreply = redisClusterCommand(context, "RPUSH %s %s",
 									  fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_HASH_TABLE:
-				sreply = redisCommand(context, "HSET %s %s %s",
+				sreply = redisClusterCommand(context, "HSET %s %s %s",
 								   fmstate->singleton_key, keyval, extraval);
 				break;
 			case PG_REDIS_ZSET_TABLE:
@@ -2193,7 +2201,7 @@ redisExecForeignInsert(EState *estate,
 				 * score comes BEFORE value in ZADD, which seems slightly
 				 * perverse
 				 */
-				sreply = redisCommand(context, "ZADD %s %s %s",
+				sreply = redisClusterCommand(context, "ZADD %s %s %s",
 								   fmstate->singleton_key, extraval, keyval);
 				break;
 			default:
@@ -2255,7 +2263,7 @@ redisExecForeignInsert(EState *estate,
 					 ));
 
 		/* Check if key is there using EXISTS  */
-		sreply = redisCommand(context, "EXISTS %s",		/* 1 or 0 */
+		sreply = redisClusterCommand(context, "EXISTS %s",		/* 1 or 0 */
 							  keyval);
 		check_reply(sreply, context, ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"failed checking key existence", NULL);
@@ -2314,7 +2322,7 @@ redisExecForeignInsert(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				sreply = redisCommand(context, "SET %s %s",
+				sreply = redisClusterCommand(context, "SET %s %s",
 									  keyval, valueval);
 				check_reply(sreply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2329,7 +2337,7 @@ redisExecForeignInsert(EState *estate,
 					{
 						valueval = OutputFunctionCall(&fmstate->p_flinfo[1],
 													  elements[i]);
-						sreply = redisCommand(context, "SADD %s %s",
+						sreply = redisClusterCommand(context, "SADD %s %s",
 											  keyval, valueval);
 						check_reply(sreply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2346,7 +2354,7 @@ redisExecForeignInsert(EState *estate,
 					{
 						valueval = OutputFunctionCall(&fmstate->p_flinfo[1],
 													  elements[i]);
-						sreply = redisCommand(context, "RPUSH %s %s",
+						sreply = redisClusterCommand(context, "RPUSH %s %s",
 											  keyval, valueval);
 						check_reply(sreply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2366,7 +2374,7 @@ redisExecForeignInsert(EState *estate,
 												elements[i]);
 						hv = OutputFunctionCall(&fmstate->p_flinfo[1],
 												elements[i + 1]);
-						sreply = redisCommand(context, "HSET %s %s %s",
+						sreply = redisClusterCommand(context, "HSET %s %s %s",
 											  keyval, hk, hv);
 						check_reply(sreply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2390,7 +2398,7 @@ redisExecForeignInsert(EState *estate,
 						 * score comes BEFORE value in ZADD, which seems
 						 * slightly perverse
 						 */
-						sreply = redisCommand(context, "ZADD %s %s %s",
+						sreply = redisClusterCommand(context, "ZADD %s %s %s",
 											  keyval, ibuff, valueval);
 						check_reply(sreply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2410,7 +2418,7 @@ redisExecForeignInsert(EState *estate,
 
 		if (fmstate->keyset)
 		{
-			sreply = redisCommand(context, "SADD %s %s",
+			sreply = redisClusterCommand(context, "SADD %s %s",
 								  fmstate->keyset, keyval);
 			check_reply(sreply, context,
 						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2429,7 +2437,7 @@ redisExecForeignDelete(EState *estate,
 {
 	RedisFdwModifyState *fmstate =
 	(RedisFdwModifyState *) rinfo->ri_FdwState;
-	redisContext *context = fmstate->context;
+	redisClusterContext *context = fmstate->context;
 	redisReply *reply = NULL;
 	bool		isNull;
 	Datum		datum;
@@ -2453,19 +2461,19 @@ redisExecForeignDelete(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				reply = redisCommand(context, "DEL %s",
+				reply = redisClusterCommand(context, "DEL %s",
 									 fmstate->singleton_key);
 				break;
 			case PG_REDIS_SET_TABLE:
-				reply = redisCommand(context, "SREM %s %s",
+				reply = redisClusterCommand(context, "SREM %s %s",
 									 fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_HASH_TABLE:
-				reply = redisCommand(context, "HDEL %s %s",
+				reply = redisClusterCommand(context, "HDEL %s %s",
 									 fmstate->singleton_key, keyval);
 				break;
 			case PG_REDIS_ZSET_TABLE:
-				reply = redisCommand(context, "ZREM %s %s",
+				reply = redisClusterCommand(context, "ZREM %s %s",
 									 fmstate->singleton_key, keyval);
 				break;
 			default:
@@ -2479,7 +2487,7 @@ redisExecForeignDelete(EState *estate,
 	else	/* not a singleton */
 	{
 		/* use DEL regardless of table type */
-		reply = redisCommand(context, "DEL %s", keyval);
+		reply = redisClusterCommand(context, "DEL %s", keyval);
 	}
 
 	check_reply(reply, context,
@@ -2489,7 +2497,7 @@ redisExecForeignDelete(EState *estate,
 
 	if (fmstate->keyset)
 	{
-		reply = redisCommand(context, "SREM %s %s",
+		reply = redisClusterCommand(context, "SREM %s %s",
 							 fmstate->keyset, keyval);
 
 		check_reply(reply, context,
@@ -2510,7 +2518,7 @@ redisExecForeignUpdate(EState *estate,
 {
 	RedisFdwModifyState *fmstate =
 	(RedisFdwModifyState *) rinfo->ri_FdwState;
-	redisContext *context = fmstate->context;
+	redisClusterContext *context = fmstate->context;
 	redisReply *ereply = NULL;
 	Datum		datum;
 	char	   *keyval;
@@ -2542,7 +2550,7 @@ redisExecForeignUpdate(EState *estate,
 	{
 		int			attnum = lfirst_int(lc);
 
-		datum = slot_getattr(slot, attnum, &isNull);
+		datum = slot_getattr(planSlot, attnum, &isNull);
 
 		if (isNull)
 			elog(ERROR, "NULL update not supported");
@@ -2593,7 +2601,9 @@ redisExecForeignUpdate(EState *estate,
 						 errmsg("cannot decompose odd number of items into a Redis hash")
 						 ));
 
+			elog(NOTICE, "line 2630 before palloc");
 			array_vals = palloc(nitems * sizeof(char *));
+			elog(NOTICE, "line 2630 after palloc");
 
 			for (i = 0; i < nitems; i++)
 			{
@@ -2624,7 +2634,7 @@ redisExecForeignUpdate(EState *estate,
 		/* make sure the new key doesn't exist */
 		if (!fmstate->singleton_key)
 		{
-			ereply = redisCommand(context, "EXISTS %s", newkey);
+			ereply = redisClusterCommand(context, "EXISTS %s", newkey);
 			ok = ereply->type == REDIS_REPLY_INTEGER && ereply->integer == 0;
 			check_reply(ereply, context,
 						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2635,15 +2645,15 @@ redisExecForeignUpdate(EState *estate,
 			switch (fmstate->table_type)
 			{
 				case PG_REDIS_SET_TABLE:
-					ereply = redisCommand(context, "SISMEMBER %s %s",
+					ereply = redisClusterCommand(context, "SISMEMBER %s %s",
 										  fmstate->singleton_key, newkey);
 					break;
 				case PG_REDIS_ZSET_TABLE:
-					ereply = redisCommand(context, "ZRANK %s %s",
+					ereply = redisClusterCommand(context, "ZRANK %s %s",
 										  fmstate->singleton_key, newkey);
 					break;
 				case PG_REDIS_HASH_TABLE:
-					ereply = redisCommand(context, "HEXISTS %s %s",
+					ereply = redisClusterCommand(context, "HEXISTS %s %s",
 										  fmstate->singleton_key, newkey);
 					break;
 				default:
@@ -2679,7 +2689,7 @@ redisExecForeignUpdate(EState *estate,
 						(errcode(ERRCODE_UNIQUE_VIOLATION),
 					  errmsg("key prefix condition violation: %s", newkey)));
 
-			ereply = redisCommand(context, "RENAME %s %s", keyval, newkey);
+			ereply = redisClusterCommand(context, "RENAME %s %s", keyval, newkey);
 
 			check_reply(ereply, context,
 						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2688,7 +2698,7 @@ redisExecForeignUpdate(EState *estate,
 
 			if (newval && fmstate->table_type == PG_REDIS_SCALAR_TABLE)
 			{
-				ereply = redisCommand(context, "SET %s %s", newkey, newval);
+				ereply = redisClusterCommand(context, "SET %s %s", newkey, newval);
 
 				check_reply(ereply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2698,14 +2708,14 @@ redisExecForeignUpdate(EState *estate,
 
 			if (fmstate->keyset)
 			{
-				ereply = redisCommand(context, "SREM %s %s", fmstate->keyset,
+				ereply = redisClusterCommand(context, "SREM %s %s", fmstate->keyset,
 									  keyval);
 				check_reply(ereply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"deleting keyset element %s", keyval);
 				freeReplyObject(ereply);
 
-				ereply = redisCommand(context, "SADD %s %s", fmstate->keyset,
+				ereply = redisClusterCommand(context, "SADD %s %s", fmstate->keyset,
 									  newkey);
 
 				check_reply(ereply, context,
@@ -2718,7 +2728,7 @@ redisExecForeignUpdate(EState *estate,
 			switch (fmstate->table_type)
 			{
 				case PG_REDIS_SCALAR_TABLE:
-					ereply = redisCommand(context, "SET %s %s",
+					ereply = redisClusterCommand(context, "SET %s %s",
 										  fmstate->singleton_key, newkey);
 					check_reply(ereply, context,
 								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2726,13 +2736,13 @@ redisExecForeignUpdate(EState *estate,
 					freeReplyObject(ereply);
 					break;
 				case PG_REDIS_SET_TABLE:
-					ereply = redisCommand(context, "SREM %s %s",
+					ereply = redisClusterCommand(context, "SREM %s %s",
 										  fmstate->singleton_key, keyval);
 					check_reply(ereply, context,
 								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"removing value %s", keyval);
 					freeReplyObject(ereply);
-					ereply = redisCommand(context, "SADD %s %s",
+					ereply = redisClusterCommand(context, "SADD %s %s",
 										  fmstate->singleton_key, newkey);
 					check_reply(ereply, context,
 								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2745,7 +2755,7 @@ redisExecForeignUpdate(EState *estate,
 
 						if (!priority)
 						{
-							ereply = redisCommand(context, "ZSCORE %s %s",
+							ereply = redisClusterCommand(context, "ZSCORE %s %s",
 												  fmstate->singleton_key,
 												  keyval);
 							check_reply(ereply, context,
@@ -2754,14 +2764,14 @@ redisExecForeignUpdate(EState *estate,
 							priority = pstrdup(ereply->str);
 							freeReplyObject(ereply);
 						}
-						ereply = redisCommand(context, "ZREM %s %s",
+						ereply = redisClusterCommand(context, "ZREM %s %s",
 											  fmstate->singleton_key, keyval);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"removing set element %s", keyval);
 						freeReplyObject(ereply);
 
-						ereply = redisCommand(context, "ZADD %s %s %s",
+						ereply = redisClusterCommand(context, "ZADD %s %s %s",
 											  fmstate->singleton_key,
 											  priority, newkey);
 						check_reply(ereply, context,
@@ -2776,7 +2786,7 @@ redisExecForeignUpdate(EState *estate,
 
 						if (!nval)
 						{
-							ereply = redisCommand(context, "HGET %s %s",
+							ereply = redisClusterCommand(context, "HGET %s %s",
 												  fmstate->singleton_key,
 												  keyval);
 							check_reply(ereply, context,
@@ -2785,14 +2795,14 @@ redisExecForeignUpdate(EState *estate,
 							nval = pstrdup(ereply->str);
 							freeReplyObject(ereply);
 						}
-						ereply = redisCommand(context, "HDEL %s %s",
+						ereply = redisClusterCommand(context, "HDEL %s %s",
 											  fmstate->singleton_key, keyval);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"removing hash element %s", keyval);
 						freeReplyObject(ereply);
 
-						ereply = redisCommand(context, "HSET %s %s %s",
+						ereply = redisClusterCommand(context, "HSET %s %s %s",
 											  fmstate->singleton_key, newkey,
 											  nval);
 						check_reply(ereply, context,
@@ -2811,15 +2821,15 @@ redisExecForeignUpdate(EState *estate,
 		if (!fmstate->singleton_key)
 		{
 			Assert(fmstate->table_type == PG_REDIS_SCALAR_TABLE);
-			ereply = redisCommand(context, "SET %s %s", keyval, newval);
+			ereply = redisClusterCommand(context, "SET %s %s", keyval, newval);
 		}
 		else
 		{
 			if (fmstate->table_type == PG_REDIS_ZSET_TABLE)
-				ereply = redisCommand(context, "ZADD %s %s %s",
+				ereply = redisClusterCommand(context, "ZADD %s %s %s",
 									  fmstate->singleton_key, newval, keyval);
 			else if (fmstate->table_type == PG_REDIS_HASH_TABLE)
-				ereply = redisCommand(context, "HSET %s %s %s",
+				ereply = redisClusterCommand(context, "HSET %s %s %s",
 									  fmstate->singleton_key, keyval, newval);
 			else
 				elog(ERROR, "impossible update");		/* should not happen */
@@ -2836,7 +2846,7 @@ redisExecForeignUpdate(EState *estate,
 
 		Assert(!fmstate->singleton_key);
 
-		ereply = redisCommand(context, "DEL %s ", newkey);
+		ereply = redisClusterCommand(context, "DEL %s ", newkey);
 		check_reply(ereply, context,
 					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"could not delete key %s", newkey);
@@ -2850,7 +2860,7 @@ redisExecForeignUpdate(EState *estate,
 
 					for (i = 0; i < nitems; i++)
 					{
-						ereply = redisCommand(context, "SADD %s %s",
+						ereply = redisClusterCommand(context, "SADD %s %s",
 											  newkey, array_vals[i]);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2865,7 +2875,7 @@ redisExecForeignUpdate(EState *estate,
 
 					for (i = 0; i < nitems; i++)
 					{
-						ereply = redisCommand(context, "RPUSH %s %s",
+						ereply = redisClusterCommand(context, "RPUSH %s %s",
 											  newkey, array_vals[i]);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2884,7 +2894,7 @@ redisExecForeignUpdate(EState *estate,
 					{
 						hk = array_vals[i];
 						hv = array_vals[i + 1];
-						ereply = redisCommand(context, "HSET %s %s %s",
+						ereply = redisClusterCommand(context, "HSET %s %s %s",
 											  newkey, hk, hv);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2908,7 +2918,7 @@ redisExecForeignUpdate(EState *estate,
 						 * score comes BEFORE value in ZADD, which seems
 						 * slightly perverse
 						 */
-						ereply = redisCommand(context, "ZADD %s %s %s",
+						ereply = redisClusterCommand(context, "ZADD %s %s %s",
 											  newkey, ibuff, zval);
 						check_reply(ereply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2944,6 +2954,6 @@ redisEndForeignModify(EState *estate,
 	if (fmstate)
 	{
 		if (fmstate->context)
-			redisFree(fmstate->context);
+			redisClusterFree(fmstate->context);
 	}
 }

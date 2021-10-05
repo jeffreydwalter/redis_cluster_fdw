@@ -1,4 +1,4 @@
-Redis FDW for PostgreSQL 9.1+
+Redis Cluster FDW for PostgreSQL 9.1+
 ==============================
 
 This PostgreSQL extension implements a Foreign Data Wrapper (FDW) for
@@ -6,7 +6,8 @@ the Redis key/value database: http://redis.io/
 
 This code was originally experimental, and largely intended as a pet project
 for Dave to experiment with and learn about FDWs in PostgreSQL. It has now been
-extended for production use by Andrew.
+extended for production use by Andrew and subsequently forked by Jeffrey Walter
+to add support for clustered Redis.
 
 By all means use it, but do so entirely at your own risk! You have been
 warned!
@@ -130,22 +131,22 @@ PostgreSQL releases. There are a few restriction on this:
 Example
 -------
 
-	CREATE EXTENSION redis_fdw;
+	CREATE EXTENSION redis_cluster_fdw;
 
-	CREATE SERVER redis_server
-		FOREIGN DATA WRAPPER redis_fdw
-		OPTIONS (address '127.0.0.1', port '6379');
+	CREATE SERVER redis_cluster
+		FOREIGN DATA WRAPPER redis_cluster_fdw
+		OPTIONS (addresses '127.0.0.1:6379,127.0.0.2:6379,127.0.0.3:6379');
 
 	CREATE FOREIGN TABLE redis_db0 (key text, val text)
-		SERVER redis_server
+		SERVER redis_cluster
 		OPTIONS (database '0');
 
 	CREATE USER MAPPING FOR PUBLIC
-		SERVER redis_server
+		SERVER redis_cluster
 		OPTIONS (password 'secret');
 
 	CREATE FOREIGN TABLE myredishash (key text, val text[])
-		SERVER redis_server
+		SERVER redis_cluster
 		OPTIONS (database '0', tabletype 'hash', tablekeyprefix 'mytable:');
 
     INSERT INTO myredishash (key, val)
@@ -159,7 +160,7 @@ Example
         WHERE key = 'mytable:r1';
 
 	CREATE FOREIGN TABLE myredis_s_hash (key text, val text)
-		SERVER redis_server
+		SERVER redis_cluster
 		OPTIONS (database '0', tabletype 'hash',  singleton_key 'mytable');
 
     INSERT INTO myredis_s_hash (key, val)

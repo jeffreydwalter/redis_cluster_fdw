@@ -9,11 +9,11 @@
 # Author: Dave Page <dpage@pgadmin.org>
 #
 # IDENTIFICATION
-#                 redis_fdw/redis_fdw.control
+#                 redis_cluster_fdw/redis_cluster_fdw.control
 # 
 ##########################################################################
 
 comment = 'Foreign data wrapper for querying a Redis server'
 default_version = '1.0'
-module_pathname = '$libdir/redis_fdw'
+module_pathname = '$libdir/redis_cluster_fdw'
 relocatable = true

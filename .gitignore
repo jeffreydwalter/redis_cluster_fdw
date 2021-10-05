@@ -1,4 +1,6 @@
 # Global excludes across all subdirectories
+*.swp
+*.swo
 *.o
 *.obj
 *.so
@@ -30,3 +32,4 @@ lib*.pc
 /Debug/
 /Release/
 /tmp_install/
+/hircluster/
