@@ -335,7 +335,7 @@ redis_cluster_fdw_validator(PG_FUNCTION_ARGS)
 			}
 
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_INVALID_OPTION_NAME),
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid option \"%s\"", def->defname),
 					 errhint("Valid options in this context are: %s",
 							 buf.len ? buf.data : "<none>")
@@ -580,9 +580,9 @@ redisGetForeignRelSize(PlannerInfo *root,
 	 * Fetch options. Get everything so we don't need to re-fetch it later in
 	 * planning.
 	 */
-	elog(NOTICE, "line 626 before palloc");
+	// elog(NOTICE, "line 626 before palloc");
 	fdw_private = (RedisClusterFdwPlanState *) palloc(sizeof(RedisClusterFdwPlanState));
-	elog(NOTICE, "line 626 after palloc");
+	// elog(NOTICE, "line 626 after palloc");
 	baserel->fdw_private = (void *) fdw_private;
 
 	table_options.nodes = NULL;
@@ -604,7 +604,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 	redisClusterConnect2(context);
 	if (context->err) {
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
 				));
 	}
@@ -618,7 +618,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 		{
 			redisClusterFree(context);
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 					 errmsg("failed to authenticate to redis: %d",
 							context->err)));
 		}
@@ -637,9 +637,9 @@ redisGetForeignRelSize(PlannerInfo *root,
 	{
 		/* it's a pity there isn't an NKEYS command in Redis */
 		int			len = strlen(table_options.keyprefix) + 2;
-		elog(NOTICE, "line 697 before palloc");
+		// elog(NOTICE, "line 697 before palloc");
 		char	   *buff = palloc(len * sizeof(char));
-		elog(NOTICE, "line 697 after palloc");
+		// elog(NOTICE, "line 697 after palloc");
 
 		snprintf(buff, len, "%s*", table_options.keyprefix);
 		reply = redisClusterCommand(context, "KEYS %s", buff);
@@ -682,7 +682,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 	{
 		redisClusterFree(context);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 				 errmsg("failed to get the database size: %d", context->err)
 				 ));
 	}
@@ -699,7 +699,6 @@ redisGetForeignRelSize(PlannerInfo *root,
 
 	freeReplyObject(reply);
 	redisClusterFree(context);
-
 
 }
 
@@ -819,7 +818,7 @@ redisExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	{
 		redisClusterFree(festate->context);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			errmsg("failed to get the table size: %d", festate->context->err)
 				 ));
 	}
@@ -829,7 +828,7 @@ redisExplainForeignScan(ForeignScanState *node, ExplainState *es)
 		char	   *err = pstrdup(reply->str);
 
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to get the table size: %s", err)
 				 ));
 	}
@@ -883,7 +882,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	if (context != NULL && context->err) {
 		redisClusterFree(context);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
 				));
 	}
@@ -897,7 +896,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		{
 			redisClusterFree(context);
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			   errmsg("failed to authenticate to redis: %s", context->errstr)
 					 ));
 		}
@@ -924,9 +923,9 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 
 	/* Stash away the state info we have already */
-	elog(NOTICE, "line 1011 before palloc");
+	// elog(NOTICE, "line 1011 before palloc");
 	festate = (RedisClusterFdwExecutionState *) palloc(sizeof(RedisClusterFdwExecutionState));
-	elog(NOTICE, "line 1011 after palloc");
+	// elog(NOTICE, "line 1011 after palloc");
 	node->fdw_state = (void *) festate;
 	festate->context = context;
 	festate->reply = NULL;
@@ -1005,7 +1004,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 			{
 				redisClusterFree(festate->context);
 				ereport(ERROR,
-						(errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION),
+						(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 						 errmsg("failed to list keys: %s", context->errstr)
 						 ));
 			}
@@ -1015,7 +1014,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 
 				freeReplyObject(sreply);
 				ereport(ERROR,
-						(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+						(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 						 errmsg("failed to list keys: %s", err)
 						 ));
 
@@ -1069,7 +1068,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	{
 		redisClusterFree(festate->context);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 				 errmsg("failed to list keys: %s", context->errstr)
 				 ));
 	}
@@ -1079,7 +1078,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 
 		freeReplyObject(reply);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed somehow: %s", err)
 				 ));
 	}
@@ -1106,7 +1105,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		else
 		{
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 					 errmsg("wrong reply type %d", cursor->type)
 					 ));
 		}
@@ -1194,7 +1193,7 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 		{
 			redisClusterFree(festate->context);
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 					 errmsg("failed to list keys: %s",
 							festate->context->errstr)
 					 ));
@@ -1205,7 +1204,7 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 
 			freeReplyObject(creply);
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 					 errmsg("failed somehow: %s", err)
 					 ));
 		}
@@ -1227,7 +1226,7 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 		else
 		{
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 					 errmsg("wrong reply type %d", cursor->type)
 					 ));
 		}
@@ -1283,7 +1282,7 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 			{
 				freeReplyObject(festate->reply);
 				redisClusterFree(festate->context);
-				ereport(ERROR, (errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_REPLY),
+				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 						 errmsg("failed to get the value for key \"%s\": %s",
 								key, festate->context->errstr)
 								));
@@ -1307,9 +1306,9 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 			switch (reply->type)
 			{
 				case REDIS_REPLY_INTEGER:
-					elog(NOTICE, "line 1395 before palloc");
+					// elog(NOTICE, "line 1395 before palloc");
 					data = (char *) palloc(sizeof(char) * 64);
-					elog(NOTICE, "line 1395 after palloc");
+					// elog(NOTICE, "line 1395 after palloc");
 					snprintf(data, 64, "%lld", reply->integer);
 					found = true;
 					break;
@@ -1334,9 +1333,9 @@ redisIterateForeignScanMulti(ForeignScanState *node)
 	/* Build the tuple */
 	if (found)
 	{
-		elog(NOTICE, "line 1422 before palloc");
+		// elog(NOTICE, "line 1422 before palloc");
 		values = (char **) palloc(sizeof(char *) * 2);
-		elog(NOTICE, "line 1423 after palloc");
+		// elog(NOTICE, "line 1423 after palloc");
 		values[0] = key;
 		values[1] = data;
 		tuple = BuildTupleFromCStrings(festate->attinmeta, values);
@@ -1381,9 +1380,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 		switch (festate->reply->type)
 		{
 			case REDIS_REPLY_INTEGER:
-				elog(NOTICE, "line 1469 before palloc");
+				// elog(NOTICE, "line 1469 before palloc");
 				key = (char *) palloc(sizeof(char) * 64);
-				elog(NOTICE, "line 1469 after palloc");
+				// elog(NOTICE, "line 1469 after palloc");
 				snprintf(key, 64, "%lld", festate->reply->integer);
 				found = true;
 				break;
@@ -1396,7 +1395,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 			case REDIS_REPLY_ARRAY:
 				freeReplyObject(festate->reply);
 				redisClusterFree(festate->context);
-				ereport(ERROR, (errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_REPLY),
+				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 				errmsg("not expecting an array for a singleton scalar table")
 								));
 				break;
@@ -1409,9 +1408,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 		switch (festate->reply->type)
 		{
 			case REDIS_REPLY_INTEGER:
-				elog(NOTICE, "line 1497 before palloc");
+				// elog(NOTICE, "line 1497 before palloc");
 				data = (char *) palloc(sizeof(char) * 64);
-				elog(NOTICE, "line 1497 after palloc");
+				// elog(NOTICE, "line 1497 after palloc");
 				snprintf(data, 64, "%lld", festate->reply->integer);
 				found = true;
 				break;
@@ -1424,7 +1423,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 			case REDIS_REPLY_ARRAY:
 				freeReplyObject(festate->reply);
 				redisClusterFree(festate->context);
-				ereport(ERROR, (errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_REPLY),
+				ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 								errmsg("not expecting an array for a single hash property: %s", festate->qual_value)
 								));
 				break;
@@ -1444,9 +1443,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 			switch (dreply->type)
 			{
 				case REDIS_REPLY_INTEGER:
-					elog(NOTICE, "line 1531 before palloc");
+					// elog(NOTICE, "line 1531 before palloc");
 					data = (char *) palloc(sizeof(char) * 64);
-					elog(NOTICE, "line 1531 after palloc");
+					// elog(NOTICE, "line 1531 after palloc");
 					snprintf(key, 64, "%lld", dreply->integer);
 					break;
 
@@ -1457,7 +1456,7 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 				case REDIS_REPLY_ARRAY:
 					freeReplyObject(festate->reply);
 					redisClusterFree(festate->context);
-					ereport(ERROR, (errcode(ERRCODE_Fdw_UNABLE_TO_CREATE_REPLY),
+					ereport(ERROR, (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
 									errmsg("not expecting array for a hash value or zset score")
 									));
 					break;
@@ -1467,9 +1466,9 @@ redisIterateForeignScanSingleton(ForeignScanState *node)
 	}
 
 	/* Build the tuple */
-	elog(NOTICE, "line 1555 before palloc");
+	// elog(NOTICE, "line 1555 before palloc");
 	values = (char **) palloc(sizeof(char *) * 2);
-	elog(NOTICE, "line 1555 after palloc");
+	// elog(NOTICE, "line 1555 after palloc");
 
 	if (found)
 	{
@@ -1606,9 +1605,9 @@ process_redis_array(redisReply *reply, redis_table_type type)
 					int			i;
 
 					pg_verifymbstr(ir->str, ir->len, false);
-					elog(NOTICE, "line 1694 before palloc");
+					// elog(NOTICE, "line 1694 before palloc");
 					buff = palloc(ir->len * 2 + 3);
-					elog(NOTICE, "line 1694 after palloc");
+					// elog(NOTICE, "line 1694 after palloc");
 					crs = buff;
 					*crs++ = '"';
 					for (i = 0; i < ir->len; i++)
@@ -1800,9 +1799,9 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	redisGetOptions(RelationGetRelid(rel),
 					&table_options);
 
-	elog(NOTICE, "line 1890 before palloc");
+	// elog(NOTICE, "line 1890 before palloc");
 	fmstate = (RedisClusterFdwModifyState *) palloc(sizeof(RedisClusterFdwModifyState));
-	elog(NOTICE, "line 1890 after palloc");
+	// elog(NOTICE, "line 1890 after palloc");
 	rinfo->ri_FdwState = fmstate;
 	fmstate->rel = rel;
 	fmstate->nodes = table_options.nodes;
@@ -1813,12 +1812,12 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	fmstate->target_attrs = (List *) list_nth(fdw_private, 0);
 
 	n_attrs = list_length(fmstate->target_attrs);
-	elog(NOTICE, "line 1904 before palloc0");
+	// elog(NOTICE, "line 1904 before palloc0");
 	fmstate->p_flinfo = (FmgrInfo *) palloc0(sizeof(FmgrInfo) * (n_attrs + 1));
-	elog(NOTICE, "line 1904 after palloc0");
-	elog(NOTICE, "line 1907 before palloc0");
+	// elog(NOTICE, "line 1904 after palloc0");
+	// elog(NOTICE, "line 1907 before palloc0");
 	fmstate->targetDims = (int *) palloc0(sizeof(int) * (n_attrs + 1));
-	elog(NOTICE, "line 1907 after palloc");
+	// elog(NOTICE, "line 1907 after palloc");
 
 	array_elem_list = (List *) list_nth(fdw_private, 1);
 	fmstate->array_elem_type = list_nth_oid(array_elem_list, 0);
@@ -1841,9 +1840,9 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 
 	if (op == CMD_UPDATE || op == CMD_INSERT)
 	{
-		elog(NOTICE, "line 1932 before palloc0");
+		// elog(NOTICE, "line 1932 before palloc0");
 		fmstate->targetDims = (int *) palloc0(sizeof(int) * (n_attrs + 1));
-		elog(NOTICE, "line 1932 before palloc0");
+		// elog(NOTICE, "line 1932 before palloc0");
 		foreach(lc, fmstate->target_attrs)
 		{
 			int			attnum = lfirst_int(lc);
@@ -1943,7 +1942,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	if (context != NULL && context->err) {
 		redisClusterFree(context);
 		ereport(ERROR,
-				(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
 				));
 	}	
@@ -1957,7 +1956,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 		{
 			redisClusterFree(context);
 			ereport(ERROR,
-					(errcode(ERRCODE_Fdw_UNABLE_TO_ESTABLISH_CONNECTION),
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 			   errmsg("failed to authenticate to redis: %s", context->errstr)
 					 ));
 		}
@@ -1990,9 +1989,9 @@ check_reply(redisReply *reply, redisClusterContext *context, int error_code, cha
 		return;
 
 	msglen = strlen(message);
-	elog(NOTICE, "line 2088 before palloc");
+	// elog(NOTICE, "line 2088 before palloc");
 	xmessage = palloc(msglen + 6);
-	elog(NOTICE, "line 2088 after palloc");
+	// elog(NOTICE, "line 2088 after palloc");
 	strncpy(xmessage, message, msglen + 1);
 	strcat(xmessage, ": %s");
 
@@ -2076,7 +2075,7 @@ redisExecForeignInsert(EState *estate,
 
 			bool		ok = true;
 
-			check_reply(sreply, context, ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+			check_reply(sreply, context, ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 						"failed checking key existence", NULL);
 
 			if (fmstate->table_type != PG_REDIS_ZSET_TABLE)
@@ -2142,7 +2141,7 @@ redisExecForeignInsert(EState *estate,
 						 ));
 		}
 
-		check_reply(sreply, context, ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+		check_reply(sreply, context, ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"cannot insert value for key %s", keyval);
 		freeReplyObject(sreply);
 	}
@@ -2196,7 +2195,7 @@ redisExecForeignInsert(EState *estate,
 		/* Check if key is there using EXISTS  */
 		sreply = redisClusterCommand(context, "EXISTS %s",		/* 1 or 0 */
 							  keyval);
-		check_reply(sreply, context, ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+		check_reply(sreply, context, ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"failed checking key existence", NULL);
 
 		if (sreply->type != REDIS_REPLY_INTEGER || sreply->integer != 0)
@@ -2256,7 +2255,7 @@ redisExecForeignInsert(EState *estate,
 				sreply = redisClusterCommand(context, "SET %s %s",
 									  keyval, valueval);
 				check_reply(sreply, context,
-							ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"could not add key %s", keyval);
 				freeReplyObject(sreply);
 				break;
@@ -2271,7 +2270,7 @@ redisExecForeignInsert(EState *estate,
 						sreply = redisClusterCommand(context, "SADD %s %s",
 											  keyval, valueval);
 						check_reply(sreply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add set member %s", valueval);
 						freeReplyObject(sreply);
 					}
@@ -2288,7 +2287,7 @@ redisExecForeignInsert(EState *estate,
 						sreply = redisClusterCommand(context, "RPUSH %s %s",
 											  keyval, valueval);
 						check_reply(sreply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add value %s", valueval);
 					}
 				}
@@ -2308,7 +2307,7 @@ redisExecForeignInsert(EState *estate,
 						sreply = redisClusterCommand(context, "HSET %s %s %s",
 											  keyval, hk, hv);
 						check_reply(sreply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add key %s", hk);
 						freeReplyObject(sreply);
 					}
@@ -2332,7 +2331,7 @@ redisExecForeignInsert(EState *estate,
 						sreply = redisClusterCommand(context, "ZADD %s %s %s",
 											  keyval, ibuff, valueval);
 						check_reply(sreply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add key %s", valueval);
 						freeReplyObject(sreply);
 					}
@@ -2352,7 +2351,7 @@ redisExecForeignInsert(EState *estate,
 			sreply = redisClusterCommand(context, "SADD %s %s",
 								  fmstate->keyset, keyval);
 			check_reply(sreply, context,
-						ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 						"could not add keyset element %s", valueval);
 			freeReplyObject(sreply);
 		}
@@ -2422,7 +2421,7 @@ redisExecForeignDelete(EState *estate,
 	}
 
 	check_reply(reply, context,
-				ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+				ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 				"failed to delete key %s", keyval);
 	freeReplyObject(reply);
 
@@ -2432,7 +2431,7 @@ redisExecForeignDelete(EState *estate,
 							 fmstate->keyset, keyval);
 
 		check_reply(reply, context,
-					ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"failed to delete keyset element %s", keyval);
 		freeReplyObject(reply);
 
@@ -2532,9 +2531,9 @@ redisExecForeignUpdate(EState *estate,
 						 errmsg("cannot decompose odd number of items into a Redis hash")
 						 ));
 
-			elog(NOTICE, "line 2630 before palloc");
+			// elog(NOTICE, "line 2630 before palloc");
 			array_vals = palloc(nitems * sizeof(char *));
-			elog(NOTICE, "line 2630 after palloc");
+			// elog(NOTICE, "line 2630 after palloc");
 
 			for (i = 0; i < nitems; i++)
 			{
@@ -2568,7 +2567,7 @@ redisExecForeignUpdate(EState *estate,
 			ereply = redisClusterCommand(context, "EXISTS %s", newkey);
 			ok = ereply->type == REDIS_REPLY_INTEGER && ereply->integer == 0;
 			check_reply(ereply, context,
-						ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 						"failed checking key existence %s", newkey);
 		}
 		else
@@ -2599,7 +2598,7 @@ redisExecForeignUpdate(EState *estate,
 					ok = ereply->type == REDIS_REPLY_NIL;
 
 				check_reply(ereply, context,
-							ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"failed checking key existence %s", keyval);
 			}
 		}
@@ -2623,7 +2622,7 @@ redisExecForeignUpdate(EState *estate,
 			ereply = redisClusterCommand(context, "RENAME %s %s", keyval, newkey);
 
 			check_reply(ereply, context,
-						ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 						"failure renaming key %s", keyval);
 			freeReplyObject(ereply);
 
@@ -2632,7 +2631,7 @@ redisExecForeignUpdate(EState *estate,
 				ereply = redisClusterCommand(context, "SET %s %s", newkey, newval);
 
 				check_reply(ereply, context,
-							ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"upating key %s", newkey);
 				freeReplyObject(ereply);
 			}
@@ -2642,7 +2641,7 @@ redisExecForeignUpdate(EState *estate,
 				ereply = redisClusterCommand(context, "SREM %s %s", fmstate->keyset,
 									  keyval);
 				check_reply(ereply, context,
-							ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"deleting keyset element %s", keyval);
 				freeReplyObject(ereply);
 
@@ -2650,7 +2649,7 @@ redisExecForeignUpdate(EState *estate,
 									  newkey);
 
 				check_reply(ereply, context,
-							ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"adding keyset element %s", newkey);
 				freeReplyObject(ereply);			}
 		}
@@ -2662,7 +2661,7 @@ redisExecForeignUpdate(EState *estate,
 					ereply = redisClusterCommand(context, "SET %s %s",
 										  fmstate->singleton_key, newkey);
 					check_reply(ereply, context,
-								ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"setting value %s", newkey);
 					freeReplyObject(ereply);
 					break;
@@ -2670,13 +2669,13 @@ redisExecForeignUpdate(EState *estate,
 					ereply = redisClusterCommand(context, "SREM %s %s",
 										  fmstate->singleton_key, keyval);
 					check_reply(ereply, context,
-								ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"removing value %s", keyval);
 					freeReplyObject(ereply);
 					ereply = redisClusterCommand(context, "SADD %s %s",
 										  fmstate->singleton_key, newkey);
 					check_reply(ereply, context,
-								ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"setting value %s", newkey);
 					freeReplyObject(ereply);
 					break;
@@ -2690,7 +2689,7 @@ redisExecForeignUpdate(EState *estate,
 												  fmstate->singleton_key,
 												  keyval);
 							check_reply(ereply, context,
-									  ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									  ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 										"getting score for key %s", keyval);
 							priority = pstrdup(ereply->str);
 							freeReplyObject(ereply);
@@ -2698,7 +2697,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "ZREM %s %s",
 											  fmstate->singleton_key, keyval);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"removing set element %s", keyval);
 						freeReplyObject(ereply);
 
@@ -2706,7 +2705,7 @@ redisExecForeignUpdate(EState *estate,
 											  fmstate->singleton_key,
 											  priority, newkey);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"setting element %s", newkey);
 						freeReplyObject(ereply);
 					}
@@ -2721,7 +2720,7 @@ redisExecForeignUpdate(EState *estate,
 												  fmstate->singleton_key,
 												  keyval);
 							check_reply(ereply, context,
-									  ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									  ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 										"fetching vcalue for key %s", keyval);
 							nval = pstrdup(ereply->str);
 							freeReplyObject(ereply);
@@ -2729,7 +2728,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "HDEL %s %s",
 											  fmstate->singleton_key, keyval);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"removing hash element %s", keyval);
 						freeReplyObject(ereply);
 
@@ -2737,7 +2736,7 @@ redisExecForeignUpdate(EState *estate,
 											  fmstate->singleton_key, newkey,
 											  nval);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"adding hash element %s", newkey);
 						freeReplyObject(ereply);
 					}
@@ -2767,7 +2766,7 @@ redisExecForeignUpdate(EState *estate,
 		}
 
 		check_reply(ereply, context,
-					ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"setting key %s", keyval);
 		freeReplyObject(ereply);
 	}
@@ -2779,7 +2778,7 @@ redisExecForeignUpdate(EState *estate,
 
 		ereply = redisClusterCommand(context, "DEL %s ", newkey);
 		check_reply(ereply, context,
-					ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"could not delete key %s", newkey);
 		freeReplyObject(ereply);
 
@@ -2794,7 +2793,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "SADD %s %s",
 											  newkey, array_vals[i]);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add element %s", array_vals[i]);
 						freeReplyObject(ereply);
 					}
@@ -2809,7 +2808,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "RPUSH %s %s",
 											  newkey, array_vals[i]);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add value %s", array_vals[i]);
 						freeReplyObject(ereply);
 					}
@@ -2828,7 +2827,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "HSET %s %s %s",
 											  newkey, hk, hv);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add key %s", hk);
 						freeReplyObject(ereply);
 					}
@@ -2852,7 +2851,7 @@ redisExecForeignUpdate(EState *estate,
 						ereply = redisClusterCommand(context, "ZADD %s %s %s",
 											  newkey, ibuff, zval);
 						check_reply(ereply, context,
-									ERRCODE_Fdw_UNABLE_TO_CREATE_EXECUTION,
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add key %s", zval);
 						freeReplyObject(ereply);
 					}
