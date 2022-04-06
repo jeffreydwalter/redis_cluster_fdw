@@ -1,4 +1,4 @@
-Redis Cluster FDW for PostgreSQL 13
+Redis Cluster FDW for PostgreSQL 14
 ==============================
 
 This PostgreSQL extension implements a Foreign Data Wrapper (FDW) for
