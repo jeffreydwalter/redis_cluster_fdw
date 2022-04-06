@@ -18,7 +18,7 @@
  */
 
 /* Debug mode */
-/* #define DEBUG */
+//#define DEBUG
 
 #include "postgres.h"
 
@@ -352,7 +352,7 @@ redis_cluster_fdw_validator(PG_FUNCTION_ARGS)
 
 			svr_nodes = defGetString(def);
 		}
-		
+
 		if (strcmp(def->defname, "password") == 0)
 		{
 			if (svr_password)
@@ -599,10 +599,13 @@ redisGetForeignRelSize(PlannerInfo *root,
 	/* Connect to the database */
 	context = redisClusterContextInit();
 	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	if(table_options.password) {
+        redisClusterSetOptionPassword(context, table_options.password);
+    }
 	redisClusterSetOptionConnectTimeout(context, timeout);
     redisClusterSetOptionRouteUseSlots(context);
 	redisClusterConnect2(context);
-	if (context->err) {
+	if (context != NULL && context->err) {
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
@@ -610,6 +613,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 	}
 
 	/* Authenticate */
+	/*
 	if (table_options.password)
 	{
 		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
@@ -617,14 +621,18 @@ redisGetForeignRelSize(PlannerInfo *root,
 		if (!reply)
 		{
 			redisClusterFree(context);
-			ereport(ERROR,
-					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-					 errmsg("failed to authenticate to redis: %d",
-							context->err)));
+            ereport(
+                ERROR,
+                (
+                    errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
+                    errmsg("[%d]: failed to authenticate to redis: %d, password: %s", __LINE__, context->err, table_options.password)
+                )
+            );
 		}
 
 		freeReplyObject(reply);
 	}
+	*/
 
 	/* Execute a query to get the table size */
 #if 0
@@ -683,7 +691,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 		redisClusterFree(context);
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
-				 errmsg("failed to get the database size: %d", context->err)
+				 errmsg("failed to get the database size: %s", context->errstr)
 				 ));
 	}
 
@@ -876,6 +884,9 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	/* Connect to the server */
 	context = redisClusterContextInit();
 	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	if(table_options.password) {
+        redisClusterSetOptionPassword(context, table_options.password);
+    }
 	redisClusterSetOptionConnectTimeout(context, timeout);
     redisClusterSetOptionRouteUseSlots(context);
 	redisClusterConnect2(context);
@@ -888,6 +899,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 
 	/* Authenticate */
+	/*
 	if (table_options.password)
 	{
 		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
@@ -895,14 +907,18 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 		if (!reply)
 		{
 			redisClusterFree(context);
-			ereport(ERROR,
-					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-			   errmsg("failed to authenticate to redis: %s", context->errstr)
-					 ));
+			ereport(
+			    ERROR,
+				(
+				    errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
+			        errmsg("[%d]: failed to authenticate to redis: %d, password: %s", __LINE__, context->err, table_options.password)
+                )
+            );
 		}
 
 		freeReplyObject(reply);
 	}
+	*/
 
 	/* See if we've got a qual we can push down */
 	if (node->ss.ps.plan->qual)
@@ -1936,6 +1952,9 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	/* Finally, Connect to the server and set the Redis execution context */
 	context = redisClusterContextInit();
 	redisClusterSetOptionAddNodes(context, table_options.nodes);
+	if(table_options.password) {
+	    redisClusterSetOptionPassword(context, table_options.password);
+	}
 	redisClusterSetOptionConnectTimeout(context, timeout);
     redisClusterSetOptionRouteUseSlots(context);
 	redisClusterConnect2(context);
@@ -1945,9 +1964,10 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
 				 errmsg("failed to connect to Redis: %s", context->errstr)
 				));
-	}	
+	}
 
 	/* Authenticate */
+	/*
 	if (table_options.password)
 	{
 		reply = redisClusterCommand(context, "AUTH %s", table_options.password);
@@ -1955,14 +1975,18 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 		if (!reply)
 		{
 			redisClusterFree(context);
-			ereport(ERROR,
-					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-			   errmsg("failed to authenticate to redis: %s", context->errstr)
-					 ));
+            ereport(
+                ERROR,
+                (
+                    errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
+                    errmsg("[%d]: failed to authenticate to redis: %d, password: %s", __LINE__, context->err, table_options.password)
+                )
+            );
 		}
 
 		freeReplyObject(reply);
 	}
+	*/
 
 	fmstate->context = context;
 
