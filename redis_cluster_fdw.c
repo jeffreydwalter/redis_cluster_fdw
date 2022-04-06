@@ -1,7 +1,7 @@
 
 /*-------------------------------------------------------------------------
  *
- *		  foreign-data wrapper for Redis
+ *		  foreign-data wrapper for Clustered Redis
  *
  * Copyright (c) 2011,2013 PostgreSQL Global Development Group
  *
@@ -12,7 +12,7 @@
  *          Jeffrey Walter <jeffreydwalter@gmail.com>
  *
  * IDENTIFICATION
- *		  redis_cluster_fdw/redis_cluster_fdw.c
+ *	    redis_cluster_fdw/redis_cluster_fdw.c
  *
  *-------------------------------------------------------------------------
  */
@@ -23,8 +23,9 @@
 #include "postgres.h"
 
 /* check that we are compiling for the right postgres version */
-#if PG_VERSION_NUM < 130000 || PG_VERSION_NUM  >= 140000
-#error wrong Postgresql version this branch is only for 13.
+#if PG_VERSION_NUM < 140000 || PG_VERSION_NUM  >= 150000
+#error wrong Postgresql version this branch is only for 14.
+#endif
 #endif
 
 
@@ -51,6 +52,7 @@
 #include "mb/pg_wchar.h"
 #include "nodes/pathnodes.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/appendinfo.h"
 #include "nodes/parsenodes.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -221,9 +223,10 @@ static TupleTableSlot *redisExecForeignInsert(EState *estate,
 					   TupleTableSlot *planSlot);
 static void redisEndForeignModify(EState *estate,
 					  ResultRelInfo *rinfo);
-static void redisAddForeignUpdateTargets(Query *parsetree,
-							 RangeTblEntry *target_rte,
-							 Relation target_relation);
+static void redisAddForeignUpdateTargets(PlannerInfo *root,
+					   Index rtindex,
+					   RangeTblEntry *target_rte,
+					   Relation target_relation);
 static TupleTableSlot *redisExecForeignDelete(EState *estate,
 					   ResultRelInfo *rinfo,
 					   TupleTableSlot *slot,
@@ -1656,12 +1659,12 @@ process_redis_array(redisReply *reply, redis_table_type type)
 
 
 static void
-redisAddForeignUpdateTargets(Query *parsetree,
+redisAddForeignUpdateTargets(PlannerInfo *root,
+							 Index rtindex,
 							 RangeTblEntry *target_rte,
 							 Relation target_relation)
 {
 	Var		   *var;
-	const char *attrname;
 	TargetEntry *tle;
 
 	/* assumes that this isn't attisdropped */
@@ -1681,23 +1684,15 @@ redisAddForeignUpdateTargets(Query *parsetree,
 	 */
 
 	/* Make a Var representing the desired value */
-	var = makeVar(parsetree->resultRelation,
+	var = makeVar(rtindex,
 				  1,
 				  attr->atttypid,
 				  attr->atttypmod,
 				  InvalidOid,
 				  0);
 
-	/* Wrap it in a resjunk TLE with a made up name ... */
-	attrname = REDISMODKEYNAME;
-
-	tle = makeTargetEntry((Expr *) var,
-						  list_length(parsetree->targetList) + 1,
-						  pstrdup(attrname),
-						  true);
-
-	/* ... and add it to the query's targetlist */
-	parsetree->targetList = lappend(parsetree->targetList, tle);
+	/* register it as a row-identity column needed by this target rel */
+	add_row_identity_var(root, var, rtindex, REDISMODKEYNAME);
 
 }
 
@@ -1842,7 +1837,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 
 	if (op == CMD_UPDATE || op == CMD_DELETE)
 	{
-		Plan	   *subplan = mtstate->mt_plans[subplan_index]->plan;
+		Plan	   *subplan = outerPlanState(mtstate)->plan;
 		Form_pg_attribute attr = TupleDescAttr(RelationGetDescr(rel), 0);		/* key is first */
 
 		fmstate->keyAttno = ExecFindJunkAttributeInTlist(subplan->targetlist,
@@ -2504,7 +2499,7 @@ redisExecForeignUpdate(EState *estate,
 	{
 		int			attnum = lfirst_int(lc);
 
-		datum = slot_getattr(planSlot, attnum, &isNull);
+		datum = slot_getattr(slot, attnum, &isNull);
 
 		if (isNull)
 			elog(ERROR, "NULL update not supported");
