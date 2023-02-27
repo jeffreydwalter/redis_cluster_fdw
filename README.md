@@ -9,7 +9,7 @@ to [Redis](http://redis.io/) key/value database. This FDW works with PostgreSQL 
 This code was originally experimental, and largely intended as a pet project
 for [Dave](#license-and-authors) to experiment with and learn about FDWs in PostgreSQL. It has now been
 extended for production use by [Andrew](#license-and-authors) and subsequently forked
-by [Jeffrey Walter](#license-and-authors) to add support for *clustered* Redis..
+by [Jeffrey Walter](#license-and-authors) to add support for *clustered* Redis.
 
 ![image](https://user-images.githubusercontent.com/41448637/219348148-13e507c7-e5e6-419a-9154-dcfebff814b2.png)
 
@@ -114,10 +114,6 @@ command:
 
 `redis_fdw` accepts the following table-level options via the
 `CREATE FOREIGN TABLE` command:
-
-- **database** as *integer*, optional, default `0`
-
-  The numeric ID of the Redis database to query.
 
 - **tabletype** as *string*, optional, no default
 
