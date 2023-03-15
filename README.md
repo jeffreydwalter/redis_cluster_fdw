@@ -119,7 +119,7 @@ command:
 
   Can be `hash`, `list`, `set` or `zset`. If not provided only look at scalar values.
 
-- **tabletype** as *string*, optional, no default
+- **tablekeyprefix** as *string*, optional, no default
 
   Only get items whose names start with the prefix.
 
